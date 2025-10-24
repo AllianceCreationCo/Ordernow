@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Alliance Creation Co — Order Here</title>
+  <style>
+    :root { --radius: 14px; }
+    html, body { height: 100%; }
+    body { margin:0; background:#fafafa; font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; padding:24px; }
+    .card { max-width:720px; margin:0 auto; background:#fff; border:1px solid #eee; border-radius:var(--radius); padding:22px; box-shadow:0 3px 14px rgba(0,0,0,.04); }
+    h1 { margin:0 0 8px; font-size:1.6rem; }
+    p.lead { margin:0 0 18px; color:#555; }
+    .row { display:grid; grid-template-columns:1fr; gap:14px; }
+    @media (min-width:640px){ .row.two { grid-template-columns:1fr 1fr; } }
+    .field { margin-bottom:14px; }
+    label { display:block; margin-bottom:6px; font-weight:600; }
+    input[type="text"], input[type="email"], textarea {
+      width:100%; padding:11px 12px; border:1px solid #ddd; border-radius:10px; font-size:14px; background:#fff;
+    }
+    textarea { min-height:140px; resize:vertical; }
+    input[type="file"] { font-size:14px; }
+    .hint { font-size:12px; color:#777; }
+    .btn { appearance:none; -webkit-appearance:none; border:none; border-radius:999px; padding:12px 18px; font-weight:700; cursor:pointer; }
+    .btn-primary { background:#111; color:#fff; }
+    .actions { display:flex; gap:10px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+    .notice { font-size:13px; color:#444; margin-top:6px; }
+    .status { font-size:14px; margin-top:12px; }
+    .status.err { color:#b00020; }
+    .toast { margin-top:14px; padding:12px 14px; border-radius:12px; border:1px solid #e5e5e5; background:#f6fff6; color:#145a32; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; color:#555; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Order Here</h1>
+    <p class="lead">Custom prints or pre-made items — attach your STL(s) if you have them.</p>
+
+    <form id="accForm" enctype="multipart/form-data" novalidate>
+      <div class="row two">
+        <div class="field">
+          <label for="firstName">First name</label>
+          <input id="firstName" name="firstName" type="text" autocomplete="given-name" required/>
+        </div>
+        <div class="field">
+          <label for="lastName">Last name</label>
+          <input id="lastName" name="lastName" type="text" autocomplete="family-name" required/>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" inputmode="email" autocomplete="email" required/>
+      </div>
+
+      <div class="field">
+        <label for="details">Custom order / pre-made item</label>
+        <textarea id="details" name="details" placeholder="Describe your custom print OR paste the exact name from the Buy Now page" required></textarea>
+      </div>
+
+      <div class="field">
+        <label for="files">STL file(s)</label>
+        <input type="file" id="files" name="files" accept=".stl,model/stl,application/sla,application/octet-stream" multiple/>
+        <div class="hint">Attach one or more .stl files (optional). If large, zip before uploading.</div>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary" type="submit" id="submitBtn">Submit Request</button>
+        <span class="notice">We’ll show a confirmation here after submit.</span>
+      </div>
+
+      <div id="status" class="status" aria-live="polite"></div>
+      <div id="thanks" class="toast" style="display:none;"></div>
+      <div id="debugRaw" class="mono"></div>
+      <div id="diag" class="mono"></div>
+    </form>
+  </div>
+
+  <script>
+    // 🔗 Your Apps Script Web App URL (keep ?pli=1)
+    const POST_URL = 'https://script.google.com/macros/s/AKfycbyTNvY0U0tQLxc3sVphErmYvNAdHGqZsgnqPLzLgGRRlJvjjpcijPIcMLqV2NYhjzQVUA/exec?pli=1';
+
+    const form = document.getElementById('accForm');
+    const statusEl = document.getElementById('status');
+    const thanksEl = document.getElementById('thanks');
+    const submitBtn = document.getElementById('submitBtn');
+    const debugRaw = document.getElementById('debugRaw');
+    const diag = document.getElementById('diag');
+
+    function showStatus(msg, isErr){ statusEl.textContent = msg || ''; statusEl.className = 'status' + (isErr ? ' err' : ''); }
+    function showThanks(count, names){
+      const filesText = count ? `${count} file(s) uploaded: ${(names||[]).join(', ')}` : 'No files were attached.';
+      thanksEl.textContent = 'Thank you for your order! We will respond within 1–2 business days to go over more details with you. ' + filesText;
+      thanksEl.style.display = 'block';
+    }
+    function fileToBase64WebSafe(file){
+      return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onerror = () => reject(new Error('Read failed: ' + file.name));
+        r.onload = () => {
+          const result = String(r.result || '');
+          const b64 = result.split(',')[1] || '';
+          const webSafe = b64.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+          resolve({ name:file.name, mimeType:file.type||'application/octet-stream', dataBase64:webSafe });
+        };
+        r.readAsDataURL(file);
+      });
+    }
+
+    // Small diag line
+    if (diag) diag.textContent = 'POST → ' + POST_URL;
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      showStatus('Uploading… please wait');
+      thanksEl.style.display = 'none';
+      debugRaw.textContent = '';
+      submitBtn.disabled = true;
+
+      try {
+        if (!form.checkValidity()) {
+          showStatus('Please complete all required fields.', true);
+          submitBtn.disabled = false;
+          return;
+        }
+
+        const filesInput = document.getElementById('files');
+        const files = (filesInput && filesInput.files) ? Array.from(filesInput.files) : [];
+        const encoded = [];
+        for (const f of files) encoded.push(await fileToBase64WebSafe(f));
+
+        const fd = new FormData();
+        fd.append('firstName', document.getElementById('firstName').value.trim());
+        fd.append('lastName',  document.getElementById('lastName').value.trim());
+        fd.append('email',     document.getElementById('email').value.trim());
+        fd.append('details',   document.getElementById('details').value.trim());
+        fd.append('filesJson', JSON.stringify(encoded));
+
+        const url = new URL(POST_URL);
+        url.searchParams.set('__json', '1');
+
+        const resp = await fetch(url.toString(), { method:'POST', body:fd, redirect:'follow' });
+
+        let data = null;
+        try {
+          if ((resp.headers.get('content-type') || '').includes('application/json')) {
+            data = await resp.json();
+          } else {
+            const raw = await resp.text();
+            debugRaw.textContent = raw.slice(0, 400);
+            const first = raw.indexOf('{'), last = raw.lastIndexOf('}');
+            if (first !== -1 && last !== -1) data = JSON.parse(raw.slice(first, last + 1));
+          }
+        } catch(_){}
+
+        if (data && data.ok) {
+          showStatus('');
+          showThanks(Number(data.savedCount || 0), data.savedNames || []);
+          form.reset();
+        } else {
+          const msg = (data && data.error) ? data.error : 'Unexpected server response';
+          showStatus('Submit failed: ' + msg, true);
+        }
+      } catch (err) {
+        showStatus('Submit failed: ' + (err && err.message ? err.message : String(err)), true);
+      } finally {
+        submitBtn.disabled = false;
+      }
+    }, { passive:false });
+  </script>
+</body>
+</html>
